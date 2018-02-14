@@ -193,7 +193,8 @@ def format_resource(value: float, resource: str):
     return '{:.0f}'.format(value)
 
 
-def slow_down_downscale(asg_sizes: dict, nodes_by_asg_zone: dict, scale_down_step_fixed: int, scale_down_step_percentage: float):
+def slow_down_downscale(asg_sizes: dict, nodes_by_asg_zone: dict, scale_down_step_fixed: int, scale_down_step_percentage: float,
+    scale_up_step_fixed: int, scale_up_step_percentage: float):
     # validate scale-down-step-fixed, must be >= 1
     if scale_down_step_fixed < 1:
         raise ValueError('scale-down-step-fixed must be >= 1')
@@ -218,6 +219,17 @@ def slow_down_downscale(asg_sizes: dict, nodes_by_asg_zone: dict, scale_down_ste
                 new_desired_size_percentage = new_desired_size_fixed
             new_desired_size = min(new_desired_size_fixed, new_desired_size_percentage)
             logger.info('Slowing down downscale: changing desired size of ASG {} (current size is {}) from {} to {}'.format(
+                        asg_name, current_size, desired_size, new_desired_size))
+            asg_sizes[asg_name] = new_desired_size
+        if amount_of_downscale <= -2 and (scale_up_step_fixed + scale_up_step_percentage) != 0:
+            amount_of_upscale = abs(amount_of_downscale)
+            new_desired_size_fixed = current_size + scale_up_step_fixed
+            new_desired_size_percentage = min(desired_size, int(math.ceil((1.00 + scale_up_step_percentage) * current_size)))
+            if new_desired_size_percentage <= current_size:
+                # percentage amount is too small, make sure we upscale by fixed amount at least
+                new_desired_size_percentage = new_desired_size_fixed
+            new_desired_size = max(new_desired_size_fixed, new_desired_size_percentage)
+            logger.info('Slowing down upscale: changing desired size of ASG {} (current size is {}) from {} to {}.'.format(
                         asg_name, current_size, desired_size, new_desired_size))
             asg_sizes[asg_name] = new_desired_size
 
@@ -379,6 +391,7 @@ def start_health_endpoint():
 
 def autoscale(buffer_percentage: dict, buffer_fixed: dict,
               scale_down_step_fixed: int, scale_down_step_percentage: float,
+              scale_up_step_fixed: int, scale_up_step_percentage: float,
               buffer_spare_nodes: int = 0, include_master_nodes: bool=False,
               dry_run: bool=False, disable_scale_down: bool=False):
     api = get_kube_api()
@@ -396,7 +409,8 @@ def autoscale(buffer_percentage: dict, buffer_fixed: dict,
     usage_by_asg_zone = calculate_usage_by_asg_zone(pods, nodes_by_name)
     asg_size = calculate_required_auto_scaling_group_sizes(nodes_by_asg_zone, usage_by_asg_zone, buffer_percentage, buffer_fixed,
                                                            buffer_spare_nodes=buffer_spare_nodes, disable_scale_down=disable_scale_down)
-    asg_size = slow_down_downscale(asg_size, nodes_by_asg_zone, scale_down_step_fixed, scale_down_step_percentage)
+    asg_size = slow_down_downscale(asg_size, nodes_by_asg_zone, scale_down_step_fixed, scale_down_step_percentage,
+                                   scale_up_step_fixed, scale_up_step_percentage)
     ready_nodes_by_asg = get_ready_nodes_by_asg(nodes_by_asg_zone)
     resize_auto_scaling_groups(autoscaling, asg_size, ready_nodes_by_asg, dry_run)
 
@@ -430,11 +444,17 @@ def main():
                         type=int, default=os.getenv('SCALE_DOWN_STEP_FIXED', 1))
     parser.add_argument('--scale-down-step-percentage',
                         help='Scale down strategy expressed in terms of instances count, defaults to 0.00, i.e. 0%%.',
-                        type=float, default=os.getenv('SCALE_DOWN_STEP_PRECENTAGE', 0.0))
+                        type=float, default=os.getenv('SCALE_DOWN_STEP_PERCENTAGE', 0.0))
+    parser.add_argument('--scale-up-step-fixed',
+                        help='Scale up strategy expressed in terms of instances count. 0 (default) disables stepping.',
+                        type=int, default=os.getenv('SCALE_UP_STEP_FIXED', 0))
+    parser.add_argument('--scale-up-step-percentage',
+                        help='Scale up strategy expressed in terms of instances count, defaults to 0.00, i.e. 0%%.',
+                        type=float, default=os.getenv('SCALE_UP_STEP_PERCENTAGE', 0.0))
 
     args = parser.parse_args()
 
-    # validate scale-down-step values
+    # validate scale-down/up-step values
     if args.scale_down_step_fixed < 1:
         msg = 'Invalid scale-down-step-fixed value: {}'.format(args.scale_down_step_fixed)
         logger.exception(msg)
@@ -465,6 +485,8 @@ def main():
             autoscale(buffer_percentage, buffer_fixed,
                       scale_down_step_fixed=args.scale_down_step_fixed,
                       scale_down_step_percentage=args.scale_down_step_percentage,
+                      scale_up_step_fixed=args.scale_up_step_fixed,
+                      scale_up_step_percentage=args.scale_up_step_percentage,
                       buffer_spare_nodes=args.buffer_spare_nodes,
                       include_master_nodes=args.include_master_nodes, dry_run=args.dry_run,
                       disable_scale_down=args.no_scale_down)
